@@ -4,7 +4,7 @@
 export const SITE = {
   name: "Vision Demo App",
   description: "A clean, ready-to-demo starting point.",
-} as const;
+
 
 // Top navigation links. Add routes in app/routes.ts and list them here.
 export const NAV_LINKS: { href: string; label: string }[] = [
