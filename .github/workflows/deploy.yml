@@ -1,0 +1,139 @@
+name: Deploy Production
+
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: production
+  cancel-in-progress: false
+
+jobs:
+
+  test:
+    name: Test and Build
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+  docker:
+    name: Build Docker Image
+    needs: test
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            -t vision:${{ github.sha }} \
+            .
+
+      - name: Export Docker image
+        run: |
+          docker save vision:${{ github.sha }} \
+            | gzip \
+            > vision-image.tar.gz
+
+      - name: Upload deployment artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vision-image
+          path: vision-image.tar.gz
+          retention-days: 1
+
+  deploy:
+    name: Deploy
+    needs: docker
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download image
+        uses: actions/download-artifact@v4
+        with:
+          name: vision-image
+
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+
+          printf "%s\n" "$SSH_PRIVATE_KEY" \
+            > ~/.ssh/vision_deploy
+
+          chmod 600 ~/.ssh/vision_deploy
+
+          ssh-keyscan -H "$VPS_HOST" \
+            >> ~/.ssh/known_hosts
+
+      - name: Upload Docker image
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          scp \
+            -i ~/.ssh/vision_deploy \
+            vision-image.tar.gz \
+            "$VPS_USER@$VPS_HOST:/tmp/vision-image.tar.gz"
+
+      - name: Upload database setup
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          scp \
+            -i ~/.ssh/vision_deploy \
+            db/setup.sql \
+            "$VPS_USER@$VPS_HOST:/opt/vision/db/setup.sql"
+
+      - name: Deploy
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          DOMAIN: ${{ secrets.DOMAIN }}
+          IMAGE: vision:${{ github.sha }}
+        run: |
+          ssh \
+            -i ~/.ssh/vision_deploy \
+            "$VPS_USER@$VPS_HOST" \
+            "
+              set -e
+
+              gunzip -c /tmp/vision-image.tar.gz \
+                | docker load
+
+              /opt/vision/scripts/deploy.sh \
+                '$IMAGE' \
+                '$DOMAIN'
+
+              rm -f /tmp/vision-image.tar.gz
+            "
